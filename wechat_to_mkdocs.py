@@ -6,6 +6,7 @@ import requests
 import logging
 import yaml
 import hashlib
+import shutil
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
@@ -40,33 +41,105 @@ DOWNLOADED_FILE = "downloaded.json"  # 记录已下载的URL
 
 
 def load_downloaded_urls():
-    """加载已下载的URL列表"""
+    """加载已下载的URL列表（返回字典：URL -> 文件信息）"""
     if not os.path.exists(DOWNLOADED_FILE):
-        return set()
+        return {}
     
     try:
         with open(DOWNLOADED_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return set(data.get("urls", []))
+            # 兼容旧格式（仅 URL 列表）
+            if isinstance(data.get("urls"), list):
+                return {url: {"filename": None} for url in data.get("urls", [])}
+            return data.get("articles", {})
     except Exception as e:
         logger.warning(f"读取已下载记录失败: {e}")
-        return set()
+        return {}
 
 
-def save_downloaded_url(url):
-    """保存已下载的URL"""
-    downloaded = load_downloaded_urls()
-    downloaded.add(url)
+def save_downloaded_url(url, filename):
+    """保存已下载的URL及其文件信息"""
+    articles = load_downloaded_urls()
+    articles[url] = {
+        "filename": filename,
+        "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
     
     try:
         with open(DOWNLOADED_FILE, "w", encoding="utf-8") as f:
-            json.dump({"urls": list(downloaded)}, f, indent=2, ensure_ascii=False)
+            json.dump({"articles": articles}, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"保存下载记录失败: {e}")
 
 
+def load_delete_urls():
+    """加载要删除的 URL 列表"""
+    if not os.path.exists(CONFIG_FILE):
+        return []
+    
+    try:
+        delete_urls = []
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#DELETE:"):
+                    url = line.replace("#DELETE:", "").strip()
+                    if url:
+                        delete_urls.append(url)
+        
+        if delete_urls:
+            logger.info(f"发现 {len(delete_urls)} 篇要删除的文章")
+        return delete_urls
+    except Exception as e:
+        logger.error(f"读取删除列表失败: {e}")
+        return []
+
+
+def delete_article(url):
+    """删除指定 URL 对应的文章文件和图片"""
+    articles = load_downloaded_urls()
+    
+    if url not in articles:
+        logger.warning(f"未找到该 URL 的下载记录: {url}")
+        return False
+    
+    filename = articles[url].get("filename")
+    
+    # 删除 markdown 文件
+    if filename:
+        filepath = os.path.join(OUTPUT_DIR, filename)
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                logger.info(f"已删除文章文件: {filepath}")
+            except Exception as e:
+                logger.error(f"删除文件失败: {e}")
+                return False
+    
+    # 删除对应的图片目录
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+    for img_dir in os.listdir(IMAGE_DIR) if os.path.exists(IMAGE_DIR) else []:
+        if img_dir.endswith(f"_{url_hash}"):
+            img_path = os.path.join(IMAGE_DIR, img_dir)
+            try:
+                shutil.rmtree(img_path)
+                logger.info(f"已删除图片目录: {img_path}")
+            except Exception as e:
+                logger.error(f"删除图片目录失败: {e}")
+    
+    # 从下载记录中移除
+    del articles[url]
+    try:
+        with open(DOWNLOADED_FILE, "w", encoding="utf-8") as f:
+            json.dump({"articles": articles}, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"更新下载记录失败: {e}")
+    
+    return True
+
+
 def load_articles():
-    """从配置文件加载文章URL列表"""
+    """从配置文件加载文章URL列表（排除删除标记的）"""
     if not os.path.exists(CONFIG_FILE):
         logger.error(f"配置文件 {CONFIG_FILE} 不存在")
         return []
@@ -76,6 +149,7 @@ def load_articles():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
+                # 跳过空行、注释和删除标记
                 if line and not line.startswith("#"):
                     urls.append(line)
         
@@ -307,6 +381,49 @@ def main():
     logger.info("===== 程序启动 =====")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # 先处理删除操作
+    delete_urls = load_delete_urls()
+    if delete_urls:
+        logger.info(f"准备删除 {len(delete_urls)} 篇文章...")
+        deleted_files = []
+        for url in delete_urls:
+            if delete_article(url):
+                deleted_files.append(url)
+                logger.info(f"文章已删除: {url}")
+        
+        # 更新 mkdocs.yml 移除被删除的文章
+        if deleted_files:
+            mkdocs_file = "mkdocs.yml"
+            try:
+                with open(mkdocs_file, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                
+                if "nav" in config:
+                    # 保留首页和其他不对应删除文章的条目
+                    new_nav = []
+                    for item in config["nav"]:
+                        if isinstance(item, dict):
+                            for title, path in item.items():
+                                # 检查此条目是否对应被删除的文章
+                                is_deleted = False
+                                for del_url in deleted_files:
+                                    articles = load_downloaded_urls()
+                                    if del_url in articles and articles[del_url].get("filename") == path:
+                                        is_deleted = True
+                                        break
+                                
+                                if not is_deleted:
+                                    new_nav.append(item)
+                        else:
+                            new_nav.append(item)
+                    
+                    config["nav"] = new_nav
+                    with open(mkdocs_file, "w", encoding="utf-8") as f:
+                        yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+                    logger.info("mkdocs.yml 已更新（移除已删除的文章）")
+            except Exception as e:
+                logger.error(f"更新 mkdocs.yml 失败: {e}")
+
     urls = load_articles()
     if not urls:
         logger.warning("没有文章需要处理")
@@ -321,6 +438,10 @@ def main():
     
     if not urls_to_process:
         logger.info("所有文章都已下载，无需处理")
+        # 如果有删除的文章，仍需要重建网站
+        if delete_urls:
+            logger.info("正在重建网站...")
+            build_mkdocs()
         return
     
     logger.info(f"需要处理: {len(urls_to_process)} 篇新文章")
@@ -333,11 +454,11 @@ def main():
             title, html = fetch_article_html(driver, url)
             logger.info(f"开始处理文章: {title}")
             html = process_images(html, title, url)
-            md_file = save_markdown(title, html)
-            articles_files.append(md_file)
+            filename, actual_title = save_markdown(title, html)
+            articles_files.append((filename, actual_title))
             
-            # 保存已下载的URL
-            save_downloaded_url(url)
+            # 保存已下载的URL和文件名
+            save_downloaded_url(url, filename)
             logger.info(f"文章完成: {title}")
         except Exception as e:
             logger.error(f"文章处理失败: {url} | {e}")
