@@ -188,6 +188,26 @@ def process_images(html, title, url):
     return str(soup)
 
 
+def get_next_article_number():
+    """获取下一个文章编号"""
+    markdown_dir = OUTPUT_DIR
+    if not os.path.exists(markdown_dir):
+        return 1
+    
+    # 查找现有的数字文件（00X.md 格式）
+    files = os.listdir(markdown_dir)
+    max_num = 0
+    for f in files:
+        if f[0].isdigit() and f.endswith('.md'):
+            try:
+                num = int(f.split('.')[0])
+                max_num = max(max_num, num)
+            except:
+                pass
+    
+    return max_num + 1
+
+
 def save_markdown(title, html):
     logger.info("转换为 Markdown 格式...")
     
@@ -214,20 +234,22 @@ def save_markdown(title, html):
     md_text = '\n'.join(cleaned_lines)
     md_text = f"# {title}\n\n" + md_text
 
-    # 清理文件名中的非法字符
-    safe_title = "".join(c if c.isalnum() or c in "._- " else "" for c in title).strip()
-    safe_title = safe_title.replace(" ", "_") or "article"
-    filepath = os.path.join(OUTPUT_DIR, f"{safe_title}.md")
+    # 使用递增的数字作为文件名（更简洁的 URL）
+    article_num = get_next_article_number()
+    filename = f"{article_num:03d}.md"  # 001.md, 002.md 等
+    filepath = os.path.join(OUTPUT_DIR, filename)
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(md_text)
 
     logger.info(f"Markdown 文件已生成: {filepath}")
-    return f"{safe_title}.md"
+    return filename, title  # 返回文件名和原始标题
 
 
 def update_mkdocs_nav(articles_files):
-    """更新 mkdocs.yml 导航，添加新文章"""
+    """更新 mkdocs.yml 导航，添加新文章
+    articles_files: [(filename, title), ...] 元组列表
+    """
     mkdocs_file = "mkdocs.yml"
     
     try:
@@ -250,13 +272,11 @@ def update_mkdocs_nav(articles_files):
             else:
                 new_nav.append(item)
         
-        # 添加新文章到导航
-        for article_file in articles_files:
-            if article_file not in existing_files:
-                # 从文件名提取标题（去掉 .md 和下划线转空格）
-                title = article_file.replace(".md", "").replace("_", " ")
-                new_nav.append({title: article_file})
-                logger.info(f"将 '{title}' 添加到导航")
+        # 添加新文章到导航（使用原始标题和数字文件名）
+        for filename, title in articles_files:
+            if filename not in existing_files:
+                new_nav.append({title: filename})
+                logger.info(f"将 '{title}' 添加到导航 ({filename})")
         
         config["nav"] = new_nav
         
