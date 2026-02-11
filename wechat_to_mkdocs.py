@@ -104,38 +104,73 @@ def delete_article(url):
         return False
     
     filename = articles[url].get("filename")
+    logger.info(f"开始删除文章，记录的文件名: {filename}")
+    
+    # 如果没有记录文件名，尝试从 markdown 目录中查找
+    if not filename:
+        logger.info("📍 未记录文件名，尝试自动查找...")
+        if os.path.exists(OUTPUT_DIR):
+            for f in os.listdir(OUTPUT_DIR):
+                if f.endswith('.md'):
+                    filepath = os.path.join(OUTPUT_DIR, f)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as file:
+                            content = file.read()
+                            # 检查文件是否包含该 URL（通常在文章中会出现）
+                            if url in content:
+                                filename = f
+                                logger.info(f"✅ 找到匹配的文件: {f}")
+                                break
+                    except:
+                        pass
     
     # 删除 markdown 文件
+    deleted = False
     if filename:
         filepath = os.path.join(OUTPUT_DIR, filename)
+        logger.info(f"准备删除: {filepath}")
         if os.path.exists(filepath):
             try:
                 os.remove(filepath)
-                logger.info(f"已删除文章文件: {filepath}")
+                logger.info(f"✅ 已删除文章文件: {filepath}")
+                deleted = True
             except Exception as e:
-                logger.error(f"删除文件失败: {e}")
-                return False
+                logger.error(f"❌ 删除文件失败: {filepath} | {e}")
+        else:
+            logger.warning(f"⚠️  文件不存在: {filepath}")
+    else:
+        logger.warning(f"⚠️  未能确定文件名，跳过文章文件删除")
     
     # 删除对应的图片目录
     url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-    for img_dir in os.listdir(IMAGE_DIR) if os.path.exists(IMAGE_DIR) else []:
-        if img_dir.endswith(f"_{url_hash}"):
-            img_path = os.path.join(IMAGE_DIR, img_dir)
-            try:
-                shutil.rmtree(img_path)
-                logger.info(f"已删除图片目录: {img_path}")
-            except Exception as e:
-                logger.error(f"删除图片目录失败: {e}")
+    logger.info(f"查找对应的图片目录（URL hash: {url_hash}）...")
+    
+    if os.path.exists(IMAGE_DIR):
+        found_images = False
+        for img_dir in os.listdir(IMAGE_DIR):
+            if img_dir.endswith(f"_{url_hash}"):
+                img_path = os.path.join(IMAGE_DIR, img_dir)
+                try:
+                    shutil.rmtree(img_path)
+                    logger.info(f"✅ 已删除图片目录: {img_path}")
+                    found_images = True
+                    deleted = True
+                except Exception as e:
+                    logger.error(f"❌ 删除图片目录失败: {img_path} | {e}")
+        
+        if not found_images:
+            logger.info(f"⚠️  未找到对应的图片目录")
     
     # 从下载记录中移除
     del articles[url]
     try:
         with open(DOWNLOADED_FILE, "w", encoding="utf-8") as f:
             json.dump({"articles": articles}, f, indent=2, ensure_ascii=False)
+        logger.info(f"✅ 已从下载记录中移除: {url}")
     except Exception as e:
-        logger.error(f"更新下载记录失败: {e}")
+        logger.error(f"❌ 更新下载记录失败: {e}")
     
-    return True
+    return deleted
 
 
 def load_articles():
