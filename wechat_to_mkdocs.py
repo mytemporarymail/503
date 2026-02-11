@@ -416,7 +416,11 @@ def main():
     logger.info("===== 程序启动 =====")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 先处理删除操作
+    has_changes = False  # 标记是否有文章改动
+    article_files_to_update = []  # 新添加的文章
+
+    # ============ 第一步：处理删除操作 ============
+    logger.info("\n--- 第一步：检查是否需要删除文章 ---")
     delete_urls = load_delete_urls()
     if delete_urls:
         logger.info(f"准备删除 {len(delete_urls)} 篇文章...")
@@ -424,7 +428,8 @@ def main():
         for url in delete_urls:
             if delete_article(url):
                 deleted_files.append(url)
-                logger.info(f"文章已删除: {url}")
+                has_changes = True
+                logger.info(f"✅ 文章已删除: {url}")
         
         # 更新 mkdocs.yml 移除被删除的文章
         if deleted_files:
@@ -434,9 +439,10 @@ def main():
                     config = yaml.safe_load(f) or {}
                 
                 if "nav" in config:
-                    # 保留首页和其他不对应删除文章的条目
-                    new_nav = []
-                    for item in config["nav"]:
+                    # 从导航中移除已删除的文章
+                    new_nav = [config["nav"][0]]  # 保留首页
+                    
+                    for item in config["nav"][1:]:  # 跳过首页
                         if isinstance(item, dict):
                             for title, path in item.items():
                                 # 检查此条目是否对应被删除的文章
@@ -455,59 +461,65 @@ def main():
                     config["nav"] = new_nav
                     with open(mkdocs_file, "w", encoding="utf-8") as f:
                         yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
-                    logger.info("mkdocs.yml 已更新（移除已删除的文章）")
+                    logger.info("✅ mkdocs.yml 已更新（移除已删除的文章）")
             except Exception as e:
-                logger.error(f"更新 mkdocs.yml 失败: {e}")
+                logger.error(f"❌ 更新 mkdocs.yml 失败: {e}")
+    else:
+        logger.info("无需删除文章")
 
+    # ============ 第二步：处理下载操作 ============
+    logger.info("\n--- 第二步：检查是否有新文章需要下载 ---")
     urls = load_articles()
     if not urls:
-        logger.warning("没有文章需要处理")
-        return
-
-    # 加载已下载的URL
-    downloaded_urls = load_downloaded_urls()
-    logger.info(f"已下载记录: {len(downloaded_urls)} 篇文章")
-    
-    # 过滤出未下载的URL
-    urls_to_process = [url for url in urls if url not in downloaded_urls]
-    
-    if not urls_to_process:
-        logger.info("所有文章都已下载，无需处理")
-        # 如果有删除的文章，仍需要重建网站
-        if delete_urls:
-            logger.info("正在重建网站...")
-            build_mkdocs()
-        return
-    
-    logger.info(f"需要处理: {len(urls_to_process)} 篇新文章")
-
-    driver = init_driver()
-    articles_files = []
-
-    for url in urls_to_process:
-        try:
-            title, html = fetch_article_html(driver, url)
-            logger.info(f"开始处理文章: {title}")
-            html = process_images(html, title, url)
-            filename, actual_title = save_markdown(title, html)
-            articles_files.append((filename, actual_title))
+        logger.warning("⚠️  没有文章 URL 需要处理")
+    else:
+        # 加载已下载的URL
+        downloaded_urls = load_downloaded_urls()
+        logger.info(f"已下载记录: {len(downloaded_urls)} 篇文章")
+        
+        # 过滤出未下载的URL
+        urls_to_process = [url for url in urls if url not in downloaded_urls]
+        
+        if urls_to_process:
+            logger.info(f"需要处理: {len(urls_to_process)} 篇新文章")
             
-            # 保存已下载的URL和文件名
-            save_downloaded_url(url, filename)
-            logger.info(f"文章完成: {title}")
-        except Exception as e:
-            logger.error(f"文章处理失败: {url} | {e}")
+            driver = init_driver()
+            
+            for url in urls_to_process:
+                try:
+                    title, html = fetch_article_html(driver, url)
+                    logger.info(f"开始处理文章: {title}")
+                    html = process_images(html, title, url)
+                    filename, actual_title = save_markdown(title, html)
+                    article_files_to_update.append((filename, actual_title))
+                    
+                    # 保存已下载的URL和文件名
+                    save_downloaded_url(url, filename)
+                    has_changes = True
+                    logger.info(f"✅ 文章完成: {title}")
+                except Exception as e:
+                    logger.error(f"❌ 文章处理失败: {url} | {e}")
+            
+            driver.quit()
+            logger.info("浏览器已关闭")
+            
+            # 更新 mkdocs 导航
+            if article_files_to_update:
+                logger.info("正在更新 MkDocs 配置...")
+                update_mkdocs_nav(article_files_to_update)
+        else:
+            logger.info("所有文章都已下载，无新文章处理")
 
-    driver.quit()
-    logger.info("浏览器已关闭")
-    
-    # 更新 mkdocs 配置和构建网站
-    if articles_files:
-        logger.info("正在更新 MkDocs 配置...")
-        update_mkdocs_nav(articles_files)
+    # ============ 第三步：重建网站 ============
+    logger.info("\n--- 第三步：重新构建网站 ---")
+    if has_changes:
+        logger.info("检测到文章改动，执行完整重建...")
+        build_mkdocs()
+    else:
+        logger.info("⚠️  无文章改动，但执行一次网站构建...")
         build_mkdocs()
     
-    logger.info("===== 全部任务完成 ✅ =====")
+    logger.info("\n===== 全部任务完成 ✅ =====")
 
 
 if __name__ == "__main__":
